@@ -1,43 +1,47 @@
-# proxy.py — Reverse Proxy شفاف، مثل Reverse Proxy پنل alwaysdata
+# proxy.py — Reverse Proxy شفافِ چندپروایدره، مثل Reverse Proxy پنل alwaysdata
 #
-# ریورس پروکسی یعنی: یک سرور واسط که جلوی سرور اصلی می‌ایستد.
-# کلاینت به آدرس پروکسی وصل می‌شود، پروکسی درخواست را همان‌طور که هست
-# به سرور مقصد می‌فرستد و جواب را همان‌طور که هست برمی‌گرداند.
-# کلاینت اصلاً سرور مقصد را نمی‌بیند؛ فقط آدرس پروکسی را می‌بیند.
+# همان مدل شفاف نسخه مینیمال، ولی با چند مقصد:
+# برای هر پروایدر فقط «آدرس» را می‌دهی — نه کلید، نه مدل، نه هیچ چیز دیگر.
+# پروایدرها را خودت تعیین می‌کنی و دستی در متغیرهای محیطی می‌نویسی؛
+# اسم را هم خودت انتخاب می‌کنی (GROQ فقط مثال است):
 #
-# مثل پنل alwaysdata: آنجا هم فقط «آدرس مقصد» را می‌دهی، نه کلید،
-# نه پروایدر، نه مدل، نه هیچ چیز دیگر. اینجا هم دقیقاً همان است —
-# تنها چیزی که وارد می‌کنی، یک خط است:
+#   GROQ_BASE_URL=https://api.groq.com/openai/v1
+#   OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 #
-#   TARGET_BASE_URL=https://آدرس-مقصد
+# آن‌وقت مسیر این می‌شود (نام در URL کوچک می‌شود):
+#   POST /groq/chat/completions       ->  https://api.groq.com/openai/v1/chat/completions
+#   POST /openrouter/chat/completions ->  https://openrouter.ai/api/v1/chat/completions
 #
-# مثال:
-#   TARGET_BASE_URL=https://api.example.com:8080
-# آن‌وقت:
-#   GET  http://localhost:3000/v1/models
-#   ->   GET https://api.example.com:8080/v1/models
-#
-# پروکسی هیچ‌چیز به درخواست اضافه یا از آن کم نمی‌کند:
+# هیچ کلیدی در پروکسی نیست و هیچ کلیدی تزریق نمی‌شود:
 # هدرها (از جمله Authorization خود کلاینت، اگر فرستاده باشد)، بدنه،
 # متد، مسیر و query دقیقاً همان‌طور که رسیده‌اند رد می‌شوند؛
 # جواب هم با همان status و همان بایت‌ها برمی‌گردد.
-# کلید را پروکسی نمی‌داند و نمی‌فرستد؛ اگر مقصد کلید بخواهد،
-# خود کلاینت باید آن را در هدرش بفرستد، مثل وقتی که مستقیم وصل می‌شد.
+# اگر مقصد کلید بخواهد، خود کلاینت باید آن را در هدرش بفرستد،
+# مثل وقتی که مستقیم وصل می‌شد.
+#
+# برای اضافه کردن پروایدر، فقط یک خط <NAME>_BASE_URL اضافه کن؛
+# برای حذف، همان خط را بردار و سرویس را ری‌استارت کن.
 #
 # اجرا:
 #   pip install -r requirements.txt
-#   TARGET_BASE_URL=https://آدرس-مقصد uvicorn proxy:app --host 0.0.0.0 --port 3000
+#   GROQ_BASE_URL=https://api.groq.com/openai/v1 uvicorn proxy:app --host 0.0.0.0 --port 3000
 
 import os
+import re
 
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-# تنها تنظیم: آدرس مقصد. چیز دیگری برای وارد کردن نیست.
-TARGET_BASE_URL = os.getenv("TARGET_BASE_URL", "").strip().rstrip("/")
+# پروایدرها فقط از آدرس خوانده می‌شوند: هر متغیر <NAME>_BASE_URL یک پروایدر است.
+# NAME همان چیزی است که تو نوشته‌ای؛ در مسیر، کوچک می‌شود.
+_PROVIDERS: dict[str, str] = {}
+for _key, _value in os.environ.items():
+    _m = re.fullmatch(r"([A-Za-z0-9_]+)_BASE_URL", _key)
+    if _m and _value.strip():
+        _PROVIDERS[_m.group(1).lower()] = _value.strip().rstrip("/")
 
-app = FastAPI(title="Reverse Proxy (transparent)")
+app = FastAPI(title="Reverse Proxy (transparent, multi-provider)")
 
 
 # هدرهای hop-by-hop که نباید رد شوند؛ بقیه هدرها دست‌نخورده می‌مانند.
@@ -57,21 +61,32 @@ _HOP_HEADERS = {
 
 @app.get("/health")
 async def health():
-    # تنها مسیر اضافه؛ فقط برای اینکه بفهمی پروکسی بالاست.
-    return {"status": "ok", "target": TARGET_BASE_URL or "not configured"}
+    # فقط برای اینکه بفهمی پروکسی بالاست و کدام پروایدرها تعریف شده‌اند.
+    return {"status": "ok", "providers": sorted(_PROVIDERS.keys())}
+
+
+@app.get("/")
+async def index():
+    # لیست پروایدرهای تعریف‌شده؛ چیز دیگری اینجا نیست.
+    return {"providers": sorted(_PROVIDERS.keys())}
 
 
 @app.api_route(
-    "/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
+    "/{name}/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
 )
-async def reverse_proxy(path: str, request: Request):
-    if not TARGET_BASE_URL:
+async def reverse_proxy(name: str, path: str, request: Request):
+    base = _PROVIDERS.get(name.lower())
+    if base is None:
         return JSONResponse(
-            status_code=503,
-            content={"error": "TARGET_BASE_URL is not set"},
+            status_code=404,
+            content={
+                "error": f"Unknown provider: {name}",
+                "providers": sorted(_PROVIDERS.keys()),
+            },
         )
 
-    url = f"{TARGET_BASE_URL}/{path}"
+    url = f"{base}/{path}"
     if request.url.query:
         url += f"?{request.url.query}"
 

@@ -1,14 +1,9 @@
 services:
-  reverse-proxy:
+  proxy:
     build: .
-    container_name: reverse-proxy
     ports:
-      - "8000:8000"
-    env_file:
-      - .env
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
+      - "3000:8000"
+    environment:
+      # فقط آدرس؛ هر پروایدر یک خط. اسم را خودت انتخاب می‌کنی.
+      GROQ_BASE_URL: ${GROQ_BASE_URL:-https://api.groq.com/openai/v1}
+      # OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-}
